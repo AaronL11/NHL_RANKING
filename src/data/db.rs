@@ -1,9 +1,8 @@
-use crate::models::teams::Team;
-use log::debug;
+use crate::data::models::{head2head::Head2Head, last10::Last10, teams::Team};
 use rusqlite::{Connection, Result, params};
-use skillratings::weng_lin::WengLinRating;
+use skillratings::{Outcomes, weng_lin::WengLinRating};
 
-type TeamID = i64;
+pub type TeamID = i64;
 
 #[derive(Debug)]
 pub struct DataBase(Connection);
@@ -20,13 +19,19 @@ impl DataBase {
             rating REAL DEFAULT 25.0,
             uncertainty REAL DEFAULT 8.33
         );
-        CREATE TABLE IF NOT EXISTS games (
+        CREATE TABLE IF NOT EXISTS H2H (
+            awayID INTEGER,
+            homeID INTEGER,
+            totalGames INTEGER DEFAULT 0,
+            teamWins INTEGER DEFAULT 0,
+            teamWinFreq REAL DEFAULT 0.0,
+            PRIMARY KEY (awayID, homeID)
+        );
+        CREATE TABLE IF NOT EXISTS last10 (
             id INTEGER PRIMARY KEY,
-            date TEXT NOT NULL,
-            home_team_id INTEGER NOT NULL,
-            away_team_id INTEGER NOT NULL,
-            FOREIGN KEY (home_team_id) REFERENCES teams(id),
-            FOREIGN KEY (away_team_id) REFERENCES teams(id)
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            games INTEGER DEFAULT 0
         );
         ",
         )?;
@@ -37,18 +42,17 @@ impl DataBase {
         self.0.execute_batch(
             "
             DROP TABLE IF EXISTS teams;
-            DROP TABLE IF EXISTS games;
-            DROP TABLE IF EXISTS players;
+            DROP TABLE IF EXISTS H2H;
+            DROP TABLE IF EXISTS last10;
         ",
         )
     }
 
     pub fn add_team(&self, id: impl Into<TeamID>, name: String, abbrev: String) -> Result<()> {
         let id = id.into();
-        debug!("Adding {} to database with id {}", name, id);
         let conn = &self.0;
         conn.execute(
-            "INSERT OR IGNORE INTO teams (id, name, abbreviation) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO teams (id, name, abbreviation) VALUES (?1, ?2, ?3);",
             params![id, name, abbrev],
         )?;
         Ok(())
@@ -56,41 +60,59 @@ impl DataBase {
 
     pub fn get_team(&self, id: impl Into<TeamID>) -> Result<Team> {
         let id = id.into();
-        debug!("Retrieving team with id: {} from the database ..", id);
         let conn = &self.0;
-        let team = conn.query_row("SELECT * FROM teams WHERE id = ?1", params![id], |row| {
-            debug!("Retrieving row: {:?}", row);
+        let team = conn.query_row("SELECT * FROM teams WHERE id = ?1;", params![id], |row| {
             Team::try_from(row)
-            // Ok(Team {
-            //     id: row.get(0)?,
-            //     name: row.get(1)?,
-            //     abbrev: row.get(2)?,
-            //     rating: WengLinRating {
-            //         rating: row.get(3)?,
-            //         uncertainty: row.get(4)?,
-            //     },
-            // })
         })?;
-        debug!("Team {} found", team.name);
         Ok(team)
+    }
+
+    pub fn add_h2h(&self, h2h: &Head2Head) -> Result<()> {
+        let conn = &self.0;
+        conn.execute(
+            "INSERT OR IGNORE INTO H2H (awayID, homeID, totalGames, teamWins, teamWinFreq) values (?1, ?2, ?3, ?4, ?5);",
+            params![h2h.team1,h2h.team2,h2h.total_games,h2h.team_wins,h2h.team_win_freq],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_h2h(&self, team1: impl Into<TeamID>, team2: impl Into<TeamID>) -> Result<Head2Head> {
+        let id1 = team1.into();
+        let id2 = team2.into();
+        let conn = &self.0;
+        let h2h = conn.query_row(
+            "SELECT * FROM H2H WHERE awayID = ?1 AND homeID = ?2;",
+            params![id1, id2],
+            |row| Head2Head::try_from(row),
+        )?;
+        Ok(h2h)
+    }
+
+    pub fn add_last10(&self, id: impl Into<TeamID>) -> Result<()> {
+        let id = id.into();
+        let conn = &self.0;
+        conn.execute(
+            "INSERT OR IGNORE INTO last10 (id) VALUES (?1);",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_last10(&self, id: impl Into<TeamID>) -> Result<Last10> {
+        let id = id.into();
+        let conn = &self.0;
+        let last10 = conn.query_row("SELECT * FROM last10 WHERE id = ?1;", params![id], |row| {
+            Last10::try_from(row)
+        })?;
+        Ok(last10)
     }
 
     pub fn get_team_abbrev(&self, abbrev: &str) -> Result<Team> {
         let conn = &self.0;
         let team = conn.query_row(
-            "SELECT * FROM teams WHERE abbreviation = ?1",
+            "SELECT * FROM teams WHERE abbreviation = ?1;",
             params![abbrev],
-            |row| {
-                Ok(Team {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    abbrev: row.get(2)?,
-                    rating: WengLinRating {
-                        rating: row.get(3)?,
-                        uncertainty: row.get(4)?,
-                    },
-                })
-            },
+            |row| Team::try_from(row),
         )?;
         Ok(team)
     }
@@ -103,8 +125,36 @@ impl DataBase {
         let id = id.into();
         let conn = &self.0;
         conn.execute(
-            "UPDATE teams SET rating = ?1, uncertainty = ?2 WHERE id = ?3",
+            "UPDATE teams SET rating = ?1, uncertainty = ?2 WHERE id = ?3;",
             params![new_rating.rating, new_rating.uncertainty, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_h2h(&self, h2h: Head2Head) -> Result<()> {
+        let conn = &self.0;
+        conn.execute(
+            "UPDATE H2H SET totalGames = ?1, teamWins = ?2, teamWinFreq = ?3 WHERE awayID = ?4 AND homeID = ?5;",
+            params![h2h.total_games,h2h.team_wins,h2h.team_win_freq,h2h.team1,h2h.team2]
+        )?;
+        Ok(())
+    }
+
+    pub fn update_last10(&self, last10: Last10) -> Result<()> {
+        let conn = &self.0;
+        let games = last10.games;
+        let mut games_num = 0;
+        for (idx, game) in games.iter().rev().enumerate() {
+            let i = if *game == Outcomes::WIN { 1 } else { 0 };
+            games_num |= i << idx;
+        }
+        conn.execute(
+            "
+        UPDATE last10
+        SET wins = ?2, losses = ?3, games = ?4
+        WHERE id = ?1;
+        ",
+            params![last10.id, last10.wins, last10.loss, games_num],
         )?;
         Ok(())
     }
